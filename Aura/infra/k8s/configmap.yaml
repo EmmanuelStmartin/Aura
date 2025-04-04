@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aura-config
+  namespace: aura
+data:
+  # Environment config
+  ENVIRONMENT: "production"
+  
+  # Feature flags
+  ENABLE_REAL_TRADING: "false"
+  ENABLE_ADVANCED_ML_MODELS: "true"
+  
+  # Service URLs (for inter-service communication)
+  DATA_INGESTION_SERVICE_URL: "http://data-ingestion-service:8001"
+  DATA_PROCESSING_SERVICE_URL: "http://data-processing-service:8002"
+  AI_MODELING_SERVICE_URL: "http://ai-modeling-service:8003"
+  PORTFOLIO_OPTIMIZATION_SERVICE_URL: "http://portfolio-optimization-service:8004"
+  PERSONALIZATION_SERVICE_URL: "http://personalization-service:8005"
+  ALERTING_SERVICE_URL: "http://alerting-service:8006"
+  AUTH_SERVICE_URL: "http://auth-service:8007"
+  BROKERAGE_INTEGRATION_SERVICE_URL: "http://brokerage-integration-service:8008"
+  
+  # Kafka configuration
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  
+  # Database configurations (connection strings are in secrets)
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "aura"
+  
+  # InfluxDB configuration
+  INFLUXDB_URL: "http://influxdb:8086"
+  INFLUXDB_ORG: "aura"
+  INFLUXDB_BUCKET: "aura_timeseries"
+  
+  # JWT configuration (non-sensitive)
+  JWT_ALGORITHM: "HS256"
+  JWT_ACCESS_TOKEN_EXPIRE_MINUTES: "30" 

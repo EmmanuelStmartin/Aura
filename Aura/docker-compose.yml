@@ -1,0 +1,301 @@
+version: '3.8'
+
+services:
+  # Infrastructure services
+  postgres:
+    image: postgres:14
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aura}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aura_password}
+      POSTGRES_DB: ${POSTGRES_DB:-aura}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aura}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  influxdb:
+    image: influxdb:2.7
+    ports:
+      - "8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUXDB_USER:-aura}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_PASSWORD:-aura_password}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUXDB_ORG:-aura}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUXDB_BUCKET:-aura_timeseries}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_TOKEN:-aura_token}
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  neo4j:
+    image: neo4j:5
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-neo4j_password}
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7474/browser/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.0
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.3.0
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Application services
+  data-ingestion-service:
+    build:
+      context: ./services/data-ingestion-service
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - PORT=8001
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      - ALPACA_API_KEY=${ALPACA_API_KEY}
+      - ALPACA_API_SECRET=${ALPACA_API_SECRET}
+      - NEWS_API_KEY=${NEWS_API_KEY}
+      - POLYGON_API_KEY=${POLYGON_API_KEY}
+    volumes:
+      - ./services/data-ingestion-service:/app
+    depends_on:
+      - kafka
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
+
+  data-processing-service:
+    build:
+      context: ./services/data-processing-service
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      - PORT=8002
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      - INFLUXDB_URL=${INFLUXDB_URL:-http://influxdb:8086}
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
+      - INFLUXDB_ORG=${INFLUXDB_ORG:-aura}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET:-aura_timeseries}
+      - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - POSTGRES_USER=${POSTGRES_USER:-aura}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-aura_password}
+      - POSTGRES_DB=${POSTGRES_DB:-aura}
+    volumes:
+      - ./services/data-processing-service:/app
+    depends_on:
+      - kafka
+      - influxdb
+      - postgres
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
+
+  ai-modeling-service:
+    build:
+      context: ./services/ai-modeling-service
+      dockerfile: Dockerfile
+    ports:
+      - "8003:8003"
+    environment:
+      - PORT=8003
+      - INFLUXDB_URL=${INFLUXDB_URL:-http://influxdb:8086}
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
+      - INFLUXDB_ORG=${INFLUXDB_ORG:-aura}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET:-aura_timeseries}
+      - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - POSTGRES_USER=${POSTGRES_USER:-aura}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-aura_password}
+      - POSTGRES_DB=${POSTGRES_DB:-aura}
+      - ENABLE_ADVANCED_ML_MODELS=${ENABLE_ADVANCED_ML_MODELS:-false}
+    volumes:
+      - ./services/ai-modeling-service:/app
+    depends_on:
+      - influxdb
+      - postgres
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8003 --reload
+
+  portfolio-optimization-service:
+    build:
+      context: ./services/portfolio-optimization-service
+      dockerfile: Dockerfile
+    ports:
+      - "8004:8004"
+    environment:
+      - PORT=8004
+      - INFLUXDB_URL=${INFLUXDB_URL:-http://influxdb:8086}
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
+      - INFLUXDB_ORG=${INFLUXDB_ORG:-aura}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET:-aura_timeseries}
+    volumes:
+      - ./services/portfolio-optimization-service:/app
+    depends_on:
+      - influxdb
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8004 --reload
+
+  personalization-service:
+    build:
+      context: ./services/personalization-service
+      dockerfile: Dockerfile
+    ports:
+      - "8005:8005"
+    environment:
+      - PORT=8005
+      - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - POSTGRES_USER=${POSTGRES_USER:-aura}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-aura_password}
+      - POSTGRES_DB=${POSTGRES_DB:-aura}
+    volumes:
+      - ./services/personalization-service:/app
+    depends_on:
+      - postgres
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8005 --reload
+
+  alerting-service:
+    build:
+      context: ./services/alerting-service
+      dockerfile: Dockerfile
+    ports:
+      - "8006:8006"
+    environment:
+      - PORT=8006
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - POSTGRES_USER=${POSTGRES_USER:-aura}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-aura_password}
+      - POSTGRES_DB=${POSTGRES_DB:-aura}
+    volumes:
+      - ./services/alerting-service:/app
+    depends_on:
+      - kafka
+      - postgres
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8006 --reload
+
+  auth-service:
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+    ports:
+      - "8007:8007"
+    environment:
+      - PORT=8007
+      - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - POSTGRES_USER=${POSTGRES_USER:-aura}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-aura_password}
+      - POSTGRES_DB=${POSTGRES_DB:-aura}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your_secret_key}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - JWT_ACCESS_TOKEN_EXPIRE_MINUTES=${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+    volumes:
+      - ./services/auth-service:/app
+    depends_on:
+      - postgres
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8007 --reload
+
+  brokerage-integration-service:
+    build:
+      context: ./services/brokerage-integration-service
+      dockerfile: Dockerfile
+    ports:
+      - "8008:8008"
+    environment:
+      - PORT=8008
+      - ALPACA_API_KEY=${ALPACA_API_KEY}
+      - ALPACA_API_SECRET=${ALPACA_API_SECRET}
+      - ENABLE_REAL_TRADING=${ENABLE_REAL_TRADING:-false}
+    volumes:
+      - ./services/brokerage-integration-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8008 --reload
+
+  api-gateway-service:
+    build:
+      context: ./services/api-gateway-service
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - DATA_INGESTION_SERVICE_URL=${DATA_INGESTION_SERVICE_URL:-http://data-ingestion-service:8001}
+      - DATA_PROCESSING_SERVICE_URL=${DATA_PROCESSING_SERVICE_URL:-http://data-processing-service:8002}
+      - AI_MODELING_SERVICE_URL=${AI_MODELING_SERVICE_URL:-http://ai-modeling-service:8003}
+      - PORTFOLIO_OPTIMIZATION_SERVICE_URL=${PORTFOLIO_OPTIMIZATION_SERVICE_URL:-http://portfolio-optimization-service:8004}
+      - PERSONALIZATION_SERVICE_URL=${PERSONALIZATION_SERVICE_URL:-http://personalization-service:8005}
+      - ALERTING_SERVICE_URL=${ALERTING_SERVICE_URL:-http://alerting-service:8006}
+      - AUTH_SERVICE_URL=${AUTH_SERVICE_URL:-http://auth-service:8007}
+      - BROKERAGE_INTEGRATION_SERVICE_URL=${BROKERAGE_INTEGRATION_SERVICE_URL:-http://brokerage-integration-service:8008}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your_secret_key}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+    volumes:
+      - ./services/api-gateway-service:/app
+    depends_on:
+      - data-ingestion-service
+      - data-processing-service
+      - ai-modeling-service
+      - portfolio-optimization-service
+      - personalization-service
+      - alerting-service
+      - auth-service
+      - brokerage-integration-service
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - REACT_APP_API_URL=${API_GATEWAY_SERVICE_URL:-http://localhost:8000}
+    depends_on:
+      - api-gateway-service
+    command: npm start
+
+volumes:
+  postgres_data:
+  influxdb_data:
+  neo4j_data: 

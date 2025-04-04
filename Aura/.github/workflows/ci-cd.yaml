@@ -1,0 +1,315 @@
+name: Aura CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/aura
+
+jobs:
+  lint-and-test:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - data-ingestion-service
+          - data-processing-service
+          - ai-modeling-service
+          - portfolio-optimization-service
+          - personalization-service
+          - alerting-service
+          - auth-service
+          - brokerage-integration-service
+          - api-gateway-service
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          cd services/${{ matrix.service }}
+          pip install -e .
+          pip install -e ../../libs/common
+          pip install pytest pytest-cov pylint mypy
+      
+      - name: Lint with pylint
+        run: |
+          cd services/${{ matrix.service }}
+          pylint app
+      
+      - name: Type check with mypy
+        run: |
+          cd services/${{ matrix.service }}
+          mypy app
+      
+      - name: Run unit tests
+        run: |
+          cd services/${{ matrix.service }}
+          pytest tests/unit --cov=app --cov-report=xml
+      
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v3
+        with:
+          file: services/${{ matrix.service }}/coverage.xml
+          flags: ${{ matrix.service }}
+  
+  frontend-lint-test:
+    name: Frontend Lint and Test
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      
+      - name: Install dependencies
+        run: |
+          cd frontend
+          npm ci
+      
+      - name: Lint with ESLint
+        run: |
+          cd frontend
+          npm run lint
+      
+      - name: Type check with TypeScript
+        run: |
+          cd frontend
+          npm run typecheck
+      
+      - name: Run unit tests
+        run: |
+          cd frontend
+          npm test -- --coverage
+      
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v3
+        with:
+          file: frontend/coverage/coverage-final.json
+          flags: frontend
+  
+  integration-tests:
+    name: Integration Tests
+    needs: [lint-and-test, frontend-lint-test]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: aura
+          POSTGRES_PASSWORD: aura_password
+          POSTGRES_DB: aura
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      
+      kafka:
+        image: bitnami/kafka:latest
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_CFG_NODE_ID: 0
+          KAFKA_CFG_PROCESS_ROLES: controller,broker
+          KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+          KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install test dependencies
+        run: |
+          pip install pytest requests pytest-asyncio pytest-xdist
+          pip install -e libs/common
+      
+      - name: Start microservices for testing
+        run: |
+          # Run all required services in background
+          docker-compose up -d data-ingestion-service data-processing-service brokerage-integration-service auth-service api-gateway-service
+          
+          # Wait for services to start
+          sleep 30
+      
+      - name: Run integration tests
+        run: |
+          cd integration-tests
+          pytest -xvs
+  
+  e2e-tests:
+    name: End-to-End Tests
+    needs: [integration-tests]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      
+      - name: Install Cypress
+        run: |
+          cd frontend
+          npm ci
+      
+      - name: Start application stack
+        run: |
+          docker-compose up -d
+          
+          # Wait for services to start
+          sleep 60
+      
+      - name: Run Cypress tests
+        run: |
+          cd frontend
+          npm run cypress:run
+      
+      - name: Store E2E test artifacts
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: cypress-results
+          path: |
+            frontend/cypress/videos/
+            frontend/cypress/screenshots/
+  
+  build-and-push:
+    name: Build and Push Docker Images
+    needs: [lint-and-test, frontend-lint-test]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy:
+      matrix:
+        service:
+          - data-ingestion-service
+          - data-processing-service
+          - ai-modeling-service
+          - portfolio-optimization-service
+          - personalization-service
+          - alerting-service
+          - auth-service
+          - brokerage-integration-service
+          - api-gateway-service
+          - frontend
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}
+          tags: |
+            type=sha,format=short
+            type=ref,event=branch
+            latest
+      
+      - name: Build and push
+        uses: docker/build-push-action@v4
+        with:
+          context: ./${{ matrix.service == 'frontend' && 'frontend' || format('services/{0}', matrix.service) }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+  
+  deploy-to-staging:
+    name: Deploy to Staging
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+      
+      - name: Set up kubeconfig
+        uses: azure/k8s-set-context@v3
+        with:
+          kubeconfig: ${{ secrets.KUBE_CONFIG }}
+      
+      - name: Set image tags in Kubernetes manifests
+        run: |
+          # Get the short SHA of the commit
+          SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          
+          # Update image tags in Kubernetes deployment manifests
+          for service in data-ingestion-service data-processing-service ai-modeling-service portfolio-optimization-service personalization-service alerting-service auth-service brokerage-integration-service api-gateway-service frontend; do
+            if [ -f "infra/k8s/$service/deployment.yaml" ]; then
+              sed -i "s|\${CONTAINER_REGISTRY}|${{ env.REGISTRY }}|g" infra/k8s/$service/deployment.yaml
+              sed -i "s|\${IMAGE_TAG}|sha-$SHA|g" infra/k8s/$service/deployment.yaml
+            fi
+          done
+      
+      - name: Apply Kubernetes ConfigMap
+        run: kubectl apply -f infra/k8s/configmap.yaml
+      
+      - name: Deploy to Kubernetes
+        run: |
+          # Create namespace if it doesn't exist
+          kubectl create namespace aura --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Apply all Kubernetes manifests
+          for service in data-ingestion-service data-processing-service ai-modeling-service portfolio-optimization-service personalization-service alerting-service auth-service brokerage-integration-service api-gateway-service frontend; do
+            if [ -d "infra/k8s/$service" ]; then
+              kubectl apply -f infra/k8s/$service/
+            fi
+          done
+      
+      - name: Verify deployment
+        run: |
+          # Check if deployments are successful
+          kubectl -n aura rollout status deployment/api-gateway-service --timeout=300s
+          kubectl -n aura rollout status deployment/frontend --timeout=300s 

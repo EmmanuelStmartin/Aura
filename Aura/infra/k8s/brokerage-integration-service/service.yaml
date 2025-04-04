@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: brokerage-integration-service
+  namespace: aura
+  labels:
+    app: brokerage-integration-service
+    component: backend
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8008"
+    prometheus.io/path: "/metrics"
+spec:
+  selector:
+    app: brokerage-integration-service
+  ports:
+  - port: 8008
+    targetPort: http
+    protocol: TCP
+    name: http
+  type: ClusterIP 

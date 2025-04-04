@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: brokerage-integration-service
+  namespace: aura
+  labels:
+    app: brokerage-integration-service
+    component: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: brokerage-integration-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: brokerage-integration-service
+    spec:
+      containers:
+      - name: brokerage-integration-service
+        image: ${CONTAINER_REGISTRY}/aura/brokerage-integration-service:${IMAGE_TAG}
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8008
+          name: http
+        env:
+        - name: PORT
+          value: "8008"
+        # API keys from Kubernetes Secrets
+        - name: ALPACA_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aura-api-keys
+              key: ALPACA_API_KEY
+        - name: ALPACA_API_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: aura-api-keys
+              key: ALPACA_API_SECRET
+        - name: ENABLE_REAL_TRADING
+          valueFrom:
+            configMapKeyRef:
+              name: aura-config
+              key: ENABLE_REAL_TRADING
+              optional: true
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 2
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 1000
+          readOnlyRootFilesystem: true
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - brokerage-integration-service
+              topologyKey: "kubernetes.io/hostname" 
